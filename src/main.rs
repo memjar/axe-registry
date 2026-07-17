@@ -69,6 +69,22 @@ fn storage_dir(name: &str) -> PathBuf {
 
 async fn health() -> &'static str { "axe-pkg ok" }
 
+async fn ping() -> Json<serde_json::Value> { Json(serde_json::json!({})) }
+
+async fn whoami(headers: HeaderMap) -> axum::response::Response {
+    if auth(&headers).is_ok() {
+        Json(serde_json::json!({"username": "axe-fleet"})).into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "not authenticated"}))).into_response()
+    }
+}
+
+async fn audit_bulk() -> Json<serde_json::Value> { Json(serde_json::json!({})) }
+
+async fn login_couch() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"ok": true}))
+}
+
 async fn list_packages(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db = state.db.lock().unwrap();
     let mut stmt = db.prepare(
@@ -340,6 +356,10 @@ async fn main() {
         .route("/health", get(health))
         .route("/packages", get(list_packages))
         .route("/-/v1/search", get(search))
+        .route("/-/ping", get(ping))
+        .route("/-/whoami", get(whoami))
+        .route("/-/npm/v1/security/advisories/bulk", axum::routing::post(audit_bulk))
+        .route("/_session", axum::routing::post(login_couch))
         .route("/@{scope}/{name}", get(get_scoped_package))
         .route("/@{scope}/{name}", put(npm_publish_scoped))
         .route("/@{scope}/{name}/{version}/-/{filename}", get(download_scoped))
