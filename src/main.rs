@@ -112,21 +112,19 @@ async fn search(
     Json(serde_json::json!({ "objects": results, "total": results.len() }))
 }
 
-async fn get_package(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
-    let name = normalize_scoped(&name);
-    let db = state.db.lock().unwrap();
-    let mut stmt = db.prepare(
-        "SELECT version, description, shasum, tarball FROM packages WHERE name = ? ORDER BY created_at DESC"
-    ).unwrap();
-    let rows: Vec<(String, Option<String>, String, String)> = stmt.query_map([&name], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-    }).unwrap().filter_map(|r| r.ok()).collect();
+async fn lookup_package(state: Arc<AppState>, name: &str) -> axum::response::Response {
+    let rows: Vec<(String, Option<String>, String, String)> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT version, description, shasum, tarball FROM packages WHERE name = ? ORDER BY created_at DESC"
+        ).unwrap();
+        stmt.query_map([name], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    };
 
     if rows.is_empty() {
-        return proxy_upstream(state.http.clone(), &name).await;
+        return proxy_upstream(state.http.clone(), name).await;
     }
 
     let mut versions = serde_json::Map::new();
@@ -148,40 +146,20 @@ async fn get_package(
     })).into_response()
 }
 
+async fn get_package(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    let name = normalize_scoped(&name);
+    lookup_package(state, &name).await
+}
+
 async fn get_scoped_package(
     State(state): State<Arc<AppState>>,
     Path((scope, name)): Path<(String, String)>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let full = format!("@{}/{}", scope, name);
-    let db = state.db.lock().unwrap();
-    let mut stmt = db.prepare(
-        "SELECT version, description, shasum, tarball FROM packages WHERE name = ? ORDER BY created_at DESC"
-    ).unwrap();
-    let rows: Vec<(String, Option<String>, String, String)> = stmt.query_map([&full], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-    }).unwrap().filter_map(|r| r.ok()).collect();
-
-    if rows.is_empty() {
-        return proxy_upstream(state.http.clone(), &full).await;
-    }
-
-    let mut versions = serde_json::Map::new();
-    let mut latest = String::new();
-    for (ver, desc, sha, tar) in &rows {
-        if latest.is_empty() { latest = ver.clone(); }
-        versions.insert(ver.clone(), serde_json::json!({
-            "name": full,
-            "version": ver,
-            "description": desc,
-            "dist": { "shasum": sha, "tarball": format!("https://pkg.axe.onl{}", tar) },
-        }));
-    }
-
-    Json(serde_json::json!({
-        "name": full,
-        "dist-tags": { "latest": latest },
-        "versions": versions,
-    })).into_response()
+    lookup_package(state, &full).await
 }
 
 async fn proxy_upstream(client: reqwest::Client, name: &str) -> axum::response::Response {
@@ -206,7 +184,7 @@ async fn npm_publish(
     headers: HeaderMap,
     Path(name): Path<String>,
     body: Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     if let Err(e) = auth(&headers) {
         return (e, Json(serde_json::json!({"error":"unauthorized"}))).into_response();
     }
@@ -277,10 +255,9 @@ async fn npm_publish_scoped(
     headers: HeaderMap,
     Path((scope, name)): Path<(String, String)>,
     body: Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let full = format!("@{}/{}", scope, name);
-    let mut h = headers.clone();
-    npm_publish(state, h, Path(full), body).await
+    npm_publish(state, headers, Path(full), body).await
 }
 
 async fn download(
